@@ -1,12 +1,10 @@
-from typing import Annotated
-
-from langchain.chat_models import init_chat_model
 from typing_extensions import TypedDict
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, START
-from langgraph.graph.message import add_messages
-from utils.call_llm import call_llm
+from langgraph.graph import StateGraph, START, END
+from agent.prompt import coordinator_prompt, planner_prompt
+
+
 import os
 
 # 初始化模型
@@ -21,10 +19,28 @@ class State(TypedDict):
     messages: list
 
 
-def chatbot(state: State):
+def coordinator(state: State):
     last_message = state["messages"][-1]
-    response = llm.invoke([AIMessage(content="你是一个友好的助手"), last_message])
+    response = llm.invoke([SystemMessage(content=coordinator_prompt), last_message])
+    state['current_plan'] = response.content
     return {"messages": [AIMessage(content=response.content)]}
+
+def planner(state: State):
+    last_message = state["messages"][-1]
+    response = llm.invoke([SystemMessage(content=planner_prompt), last_message])
+    return {"messages": [AIMessage(content=response.content)]}
+
+def chat(state: State):
+    last_message = state["messages"][-1]
+    response = llm.invoke([SystemMessage(content=planner_prompt), last_message])
+    return {"messages": [AIMessage(content=response.content)]}
+
+# 定义路由函数，根据状态返回不同的节点
+def route_to_node(state: State):
+    current_plan = state.get("current_plan")
+    if not current_plan or current_plan == "handoff_to_planner()":
+        return "planner"
+    return "end"
 
 
 # The first argument is the unique node name
@@ -32,7 +48,11 @@ def chatbot(state: State):
 # the node is used.
 def build_graph():
     graph_builder = StateGraph(State)
-    graph_builder.add_node("chatbot", chatbot)
-    graph_builder.add_edge(START, "chatbot")
+    graph_builder.add_node("coordinator", coordinator)
+    graph_builder.add_node("planner", planner)
+    graph_builder.add_edge(START, "coordinator")
+    graph_builder.add_conditional_edges("coordinator", route_to_node, {"planner": "planner","end": END})
+    graph_builder.add_edge("planner", END)
+    
     graph = graph_builder.compile()
     return graph
